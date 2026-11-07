@@ -1,7 +1,7 @@
 # proxmox-printserver
 
 Gör en USB-skrivare på en Proxmox-värd till en printserver i en oprivilegierad LXC:
-CUPS + AirPrint (Avahi), fast IP, drivrutiner för HP, Brother, Canon, Epson m.fl.
+CUPS + AirPrint (Avahi), DHCP (standard) eller fast IP, drivrutiner för HP, Brother, Canon, Epson m.fl.
 
 ## Installera
 
@@ -16,7 +16,7 @@ Använd `bash <(curl …)`, inte `curl … | bash` – skriptet ställer frågor
 Skriptet:
 1. hittar USB-skrivaren (USB-klass 07),
 2. lägger en udev-regel på värden så att containern når just den skrivaren,
-3. skapar en Debian-LXC (oprivilegierad, fast IP, startar vid uppstart),
+3. skapar en Debian-LXC (oprivilegierad, DHCP eller fast IP, startar vid uppstart),
 4. binder in `/dev/bus/usb` i containern,
 5. installerar CUPS, drivrutiner och Avahi,
 6. lägger till skrivaren, delar den (AirPrint) och skapar en webbadmin.

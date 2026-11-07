@@ -8,13 +8,13 @@
 # Gör:
 #   1. Hittar USB-skrivaren på värden (USB-klass 07).
 #   2. Lägger en udev-regel på värden så att containern får läsa/skriva just den.
-#   3. Skapar en oprivilegierad Debian-LXC med fast IP, startar vid uppstart.
+#   3. Skapar en oprivilegierad Debian-LXC (DHCP eller fast IP), startar vid uppstart.
 #   4. Skickar in /dev/bus/usb i containern.
 #   5. Installerar CUPS, drivrutiner (printer-driver-all, hplip, gutenprint) och Avahi.
 #   6. Lägger till skrivaren, delar den på nätet (AirPrint) och skapar en admin.
 #
 # Allt kan förinställas med miljövariabler (annars frågar skriptet):
-#   CTID HOSTNAMN IP_CIDR GW BRYGGA LAGRING DISK_GB MINNE ADMIN_ANV SKRIVARNAMN
+#   CTID HOSTNAMN IP_CIDR(=dhcp) GW BRYGGA LAGRING DISK_GB MINNE ADMIN_ANV SKRIVARNAMN
 set -euo pipefail
 
 fel()  { echo "FEL: $*" >&2; exit 1; }
@@ -64,8 +64,10 @@ fraga HOSTNAMN  "Värdnamn"                             "printserver"
 fraga BRYGGA    "Nätverksbrygga"                       "vmbr0"
 VARD_CIDR=$(ip -o -4 addr show dev "$BRYGGA" 2>/dev/null | awk '{print $4; exit}')
 PREFIX=${VARD_CIDR#*/}; [ -n "$VARD_CIDR" ] || PREFIX=24
-fraga IP_CIDR   "Fast IP för containern (värden har ${VARD_CIDR:-?}, t.ex. ${VARD_CIDR%.*/*}.60)" ""
-fraga GW        "Gateway"                              "$STD_GW"
+fraga IP_CIDR   "IP för containern: Enter = DHCP, eller fast adress (värden har ${VARD_CIDR:-?})" "dhcp"
+IP_CIDR=$(echo "$IP_CIDR" | tr -d '[:space:]')
+[ "${IP_CIDR,,}" = dhcp ] && IP_CIDR=dhcp
+[ "$IP_CIDR" = dhcp ] || fraga GW "Gateway" "$STD_GW"
 fraga LAGRING   "Lagring för disken"                   "${STD_LAGRING:-local-lvm}"
 fraga DISK_GB   "Diskstorlek (GB)"                     "4"
 fraga MINNE     "Minne (MB)"                           "512"
@@ -73,13 +75,14 @@ fraga ADMIN_ANV "Användarnamn för CUPS-webbadmin"      "cupsadmin"
 STD_NAMN=$(echo "$PRODUKT" | tr -cs 'A-Za-z0-9' '_' | sed 's/^_*//;s/_*$//')
 fraga SKRIVARNAMN "Skrivarens kortnamn (utan mellanslag)" "${STD_NAMN:-Skrivare}"
 
-IP_CIDR=$(echo "$IP_CIDR" | tr -d '[:space:]')
-[[ "$IP_CIDR" == */* ]] || IP_CIDR="$IP_CIDR/$PREFIX"
-[[ "$IP_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || fel "ogiltig IP: \"$IP_CIDR\" (skriv t.ex. ${VARD_CIDR%.*/*}.60)"
 [[ "$CTID" =~ ^[0-9]+$ ]] || fel "ogiltigt container-ID"
 pct status "$CTID" >/dev/null 2>&1 && fel "container $CTID finns redan"
+if [ "$IP_CIDR" != dhcp ]; then
+[[ "$IP_CIDR" == */* ]] || IP_CIDR="$IP_CIDR/$PREFIX"
+[[ "$IP_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || fel "ogiltig IP: \"$IP_CIDR\" (skriv t.ex. ${VARD_CIDR%.*/*}.60)"
 IP=${IP_CIDR%/*}
 if ping -c1 -W1 "$IP" >/dev/null 2>&1; then fel "$IP svarar redan på ping – välj en ledig adress"; fi
+fi
 
 while :; do
   read -r -s -p "Lösenord för $ADMIN_ANV (webbadmin): " PW1; echo
@@ -106,6 +109,11 @@ MALL=$(pveam available --section system | awk '{print $2}' | grep -E '^debian-12
 [ -n "$MALL" ] || fel "hittar ingen Debian-mall (pveam available)"
 pveam list local | grep -q "$MALL" || pveam download local "$MALL"
 
+if [ "$IP_CIDR" = dhcp ]; then
+  NAT=(--net0 "name=eth0,bridge=$BRYGGA,ip=dhcp")
+else
+  NAT=(--net0 "name=eth0,bridge=$BRYGGA,ip=$IP_CIDR,gw=$GW" --nameserver "$GW")
+fi
 info "Skapar container $CTID ($HOSTNAMN, $IP_CIDR) …"
 pct create "$CTID" "local:vztmpl/$MALL" \
   --hostname "$HOSTNAMN" \
@@ -113,11 +121,10 @@ pct create "$CTID" "local:vztmpl/$MALL" \
   --features nesting=1 \
   --cores 1 --memory "$MINNE" --swap 256 \
   --rootfs "$LAGRING:$DISK_GB" \
-  --net0 "name=eth0,bridge=$BRYGGA,ip=$IP_CIDR,gw=$GW" \
-  --nameserver "$GW" \
+  "${NAT[@]}" \
   --timezone host \
   --onboot 1 \
-  --description "Printserver (CUPS + AirPrint) för $TILLV $PRODUKT ($VID:$PID). Webbadmin: https://$IP:631"
+  --description "Printserver (CUPS + AirPrint) för $TILLV $PRODUKT ($VID:$PID). Webbadmin: https://<containerns IP>:631"
 
 # --- 4. USB in i containern -------------------------------------------------
 cat >>"/etc/pve/lxc/$CTID.conf" <<'EOF'
@@ -132,6 +139,12 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 || fel "containern når inte internet (kontrollera IP/gateway/DNS)"
+if [ "$IP_CIDR" = dhcp ]; then
+  IP=$(pct exec "$CTID" -- ip -4 -o addr show dev eth0 | awk '{print $4; exit}'); IP=${IP%/*}
+  [ -n "$IP" ] || fel "containern fick ingen IP via DHCP"
+  info "Containern fick $IP via DHCP"
+fi
+MAC=$(pct config "$CTID" | sed -n 's/^net0:.*hwaddr=\([0-9A-Fa-f:]*\).*/\1/p')
 
 # --- 5. Paket ---------------------------------------------------------------
 info "Installerar CUPS, drivrutiner och Avahi (tar några minuter) …"
@@ -200,7 +213,7 @@ pct exec "$CTID" -- bash -c "
 cat <<EOF
 
 KLART
-  Container : $CTID ($HOSTNAMN), IP $IP
+  Container : $CTID ($HOSTNAMN), IP $IP ($([ "$IP_CIDR" = dhcp ] && echo DHCP || echo fast)), MAC $MAC
   Skrivare  : $SKRIVARNAMN – $TILLV $PRODUKT
   URI       : $URI
   Drivrutin : $DRIVER
@@ -210,3 +223,8 @@ Prova:
   pct exec $CTID -- lp -d $SKRIVARNAMN /usr/share/cups/data/testprint
   iPhone/Mac: Dela → Skriv ut → skrivaren ska synas som "$TILLV $PRODUKT".
 EOF
+if [ "$IP_CIDR" = dhcp ]; then
+  echo
+  echo "Tips: reservera $IP för MAC $MAC i routern så att webbadressen inte byts."
+  echo "(AirPrint hittar skrivaren ändå, även om IP:n ändras.)"
+fi
