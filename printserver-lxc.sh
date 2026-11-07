@@ -61,9 +61,11 @@ STD_GW=$(ip route | awk '/^default/ {print $3; exit}')
 STD_LAGRING=$(pvesm status -content rootdir 2>/dev/null | awk 'NR>1 && $3=="active" {print $1; exit}')
 fraga CTID      "Container-ID"                         "$(pvesh get /cluster/nextid)"
 fraga HOSTNAMN  "Värdnamn"                             "printserver"
-fraga IP_CIDR   "Fast IP med nätmask (t.ex. 192.168.1.60/24)" ""
-fraga GW        "Gateway"                              "$STD_GW"
 fraga BRYGGA    "Nätverksbrygga"                       "vmbr0"
+VARD_CIDR=$(ip -o -4 addr show dev "$BRYGGA" 2>/dev/null | awk '{print $4; exit}')
+PREFIX=${VARD_CIDR#*/}; [ -n "$VARD_CIDR" ] || PREFIX=24
+fraga IP_CIDR   "Fast IP för containern (värden har ${VARD_CIDR:-?}, t.ex. ${VARD_CIDR%.*/*}.60)" ""
+fraga GW        "Gateway"                              "$STD_GW"
 fraga LAGRING   "Lagring för disken"                   "${STD_LAGRING:-local-lvm}"
 fraga DISK_GB   "Diskstorlek (GB)"                     "4"
 fraga MINNE     "Minne (MB)"                           "512"
@@ -71,7 +73,9 @@ fraga ADMIN_ANV "Användarnamn för CUPS-webbadmin"      "cupsadmin"
 STD_NAMN=$(echo "$PRODUKT" | tr -cs 'A-Za-z0-9' '_' | sed 's/^_*//;s/_*$//')
 fraga SKRIVARNAMN "Skrivarens kortnamn (utan mellanslag)" "${STD_NAMN:-Skrivare}"
 
-[[ "$IP_CIDR" =~ ^[0-9.]+/[0-9]+$ ]] || fel "IP måste anges som t.ex. 192.168.1.60/24"
+IP_CIDR=$(echo "$IP_CIDR" | tr -d '[:space:]')
+[[ "$IP_CIDR" == */* ]] || IP_CIDR="$IP_CIDR/$PREFIX"
+[[ "$IP_CIDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]] || fel "ogiltig IP: \"$IP_CIDR\" (skriv t.ex. ${VARD_CIDR%.*/*}.60)"
 [[ "$CTID" =~ ^[0-9]+$ ]] || fel "ogiltigt container-ID"
 pct status "$CTID" >/dev/null 2>&1 && fel "container $CTID finns redan"
 IP=${IP_CIDR%/*}
